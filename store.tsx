@@ -113,6 +113,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isSignalingSubscribedRef = useRef<boolean>(false);
   const pendingSignalsRef = useRef<Array<{ type: any; recipientId?: string | undefined; payload: any }>>([]);
   const localVideoTrackRef = useRef<MediaStreamTrack | null>(null); 
+  const pendingRemoteCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   
   // Ref to track incoming call state within event listeners without dependency loops
   const incomingCallRef = useRef<IncomingCall | null>(null);
@@ -486,6 +487,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   } catch (e) {
                     console.error("Error adding ice candidate", e);
                   }
+                } else if (signalPayload.candidate) {
+                  // Peer connection not created yet: buffer the remote candidate
+                  const buf = pendingRemoteCandidatesRef.current.get(senderId) || [];
+                  buf.push(signalPayload.candidate);
+                  pendingRemoteCandidatesRef.current.set(senderId, buf);
+                  console.debug('[SIGNAL] buffered remote candidate for', senderId);
                 }
               }
               break;
@@ -960,6 +967,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     pc.onnegotiationneeded = () => console.debug('[WEBRTC] negotiationneeded', recipientId);
 
     peerConnectionsRef.current.set(recipientId, pc);
+
+    // Flush any pending remote ICE candidates we received before this PC existed
+    const pending = pendingRemoteCandidatesRef.current.get(recipientId);
+    if (pending && pending.length > 0) {
+      (async () => {
+        for (const c of pending) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(c));
+            console.debug('[WEBRTC] flushed pending remote candidate for', recipientId, c);
+          } catch (e) {
+            console.error('[WEBRTC] error adding flushed candidate for', recipientId, e);
+          }
+        }
+      })();
+      pendingRemoteCandidatesRef.current.delete(recipientId);
+    }
+
     return pc;
   };
 
