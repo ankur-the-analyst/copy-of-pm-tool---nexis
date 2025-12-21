@@ -14,7 +14,9 @@ export const Communication: React.FC = () => {
   const { 
     messages, addMessage, currentUser, users, groups, createGroup, markChatRead, getUnreadCount, 
     startCall, startGroupCall, addToCall, endCall, isInCall, activeCallData, localStream, remoteStreams, isScreenSharing, toggleScreenShare,
-    isMicOn, isCameraOn, toggleMic, toggleCamera, deletedMessageIds, clearChatHistory
+    isMicOn, isCameraOn, toggleMic, toggleCamera, deletedMessageIds, clearChatHistory,
+    // incoming call helpers
+    incomingCall, acceptIncomingCall, rejectIncomingCall
   } = useApp();
   
   // UI State
@@ -497,6 +499,27 @@ export const Communication: React.FC = () => {
           </div>
       </Modal>
   );
+
+  // --- Incoming Call Modal ---
+  const IncomingCallModal = () => {
+    if (!incomingCall) return null;
+    const caller = users.find(u => u.id === incomingCall.callerId);
+    return (
+      <Modal isOpen={true} onClose={() => rejectIncomingCall()} title="Incoming Call">
+        <div className="space-y-4 text-center">
+          <div className="flex items-center justify-center">
+            <img src={caller?.avatar} className="w-16 h-16 rounded-full mr-3" />
+          </div>
+          <div className="text-lg font-semibold">{caller?.name || 'Unknown'}</div>
+          <div className="text-sm text-slate-500">{incomingCall.isVideo ? 'Video Call' : 'Audio Call'}</div>
+          <div className="pt-4 flex items-center justify-center space-x-4">
+            <button onClick={async () => { await acceptIncomingCall(); }} className="px-4 py-2 bg-green-600 text-white rounded-lg">Accept</button>
+            <button onClick={() => rejectIncomingCall()} className="px-4 py-2 bg-red-50 text-red-600 rounded-lg border">Reject</button>
+          </div>
+        </div>
+      </Modal>
+    );
+  };
 
   return (
     <div className="flex flex-1 bg-white md:rounded-xl md:shadow-sm md:border md:border-slate-200 overflow-hidden md:m-6 m-0 relative">
