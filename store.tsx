@@ -383,9 +383,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .on('broadcast', { event: 'signal' }, async ({ payload }) => {
         const { type, senderId, recipientId, payload: signalPayload } = payload as SignalData;
 
+        // Diagnostic logging for signaling messages
+        try {
+          console.debug('[SIGNAL] received', { type, senderId, recipientId, signalPayload, myId: currentUser?.id, isInCall });
+        } catch (e) { /* ignore logging errors */ }
+
         // Ignore if not meant for us (unless public)
-        if (recipientId && recipientId !== currentUser.id && type !== 'USER_ONLINE') return;
-        if (senderId === currentUser.id) return; // Don't process own messages
+        if (recipientId && recipientId !== currentUser.id && type !== 'USER_ONLINE') {
+          console.debug('[SIGNAL] ignored (not for this user)', { type, senderId, recipientId, myId: currentUser?.id });
+          return;
+        }
+        if (senderId === currentUser.id) {
+          console.debug('[SIGNAL] ignored (own message)', { type, senderId });
+          return; // Don't process own messages
+        }
 
         switch (type) {
             case 'USER_ONLINE':
@@ -393,7 +404,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               break;
     
             case 'OFFER':
-              if (isInCall) return; // Busy
+              console.debug('[SIGNAL] OFFER from', senderId, 'isVideo=', signalPayload?.isVideo, 'callId=', signalPayload?.callId);
+              if (isInCall) {
+                console.debug('[SIGNAL] OFFER ignored - user is already in a call', { myId: currentUser?.id });
+                return; // Busy
+              }
               setIncomingCall({
                 callerId: senderId,
                 isVideo: signalPayload.isVideo,
@@ -404,6 +419,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               break;
     
             case 'ANSWER':
+              console.debug('[SIGNAL] ANSWER from', senderId);
               {
                 const pc = peerConnectionsRef.current.get(senderId);
                 if (pc) {
@@ -436,6 +452,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               break;
     
             case 'CANDIDATE':
+              console.debug('[SIGNAL] CANDIDATE from', senderId, signalPayload?.candidate);
               {
                 const pc = peerConnectionsRef.current.get(senderId);
                 if (pc && signalPayload.candidate) {
@@ -449,6 +466,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               break;
     
             case 'HANGUP':
+              console.debug('[SIGNAL] HANGUP from', senderId);
               // Check if we have a pending incoming call from this sender (Missed Call Scenario)
               if (incomingCallRef.current && incomingCallRef.current.callerId === senderId) {
                   // The caller hung up before we answered
