@@ -619,28 +619,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
       })
       .subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-                signalingChannelRef.current = channel;
-                isSignalingSubscribedRef.current = true;
-                // Flush any queued signals
-                (async () => {
-                  try {
-                    const queued = pendingSignalsRef.current.splice(0, pendingSignalsRef.current.length);
-                    for (const q of queued) {
-                      await signalingChannelRef.current?.send({ type: 'broadcast', event: 'signal', payload: { type: q.type, senderId: currentUser?.id, recipientId: q.recipientId, payload: q.payload } });
-                    }
-                  } catch (e) {
-                    console.error('Error flushing queued signals', e);
+          console.debug('[SIGNAL] subscribe status:', status);
+          if (status === 'SUBSCRIBED') {
+              signalingChannelRef.current = channel;
+              isSignalingSubscribedRef.current = true;
+              console.debug('[SIGNAL] channel subscribed, flushing queued signals count=', pendingSignalsRef.current.length);
+              // Flush any queued signals
+              (async () => {
+                try {
+                  const queued = pendingSignalsRef.current.splice(0, pendingSignalsRef.current.length);
+                  for (const q of queued) {
+                    console.debug('[SIGNAL] flushing queued signal', q.type, 'to', q.recipientId);
+                    await signalingChannelRef.current?.send({ type: 'broadcast', event: 'signal', payload: { type: q.type, senderId: currentUser?.id, recipientId: q.recipientId, payload: q.payload } });
                   }
-                })();
+                } catch (e) {
+                  console.error('Error flushing queued signals', e);
+                }
+              })();
 
-                // Announce online
-                 sendSignal('USER_ONLINE', undefined, {});
-            }
-            if (status === 'CLOSED' || status === 'REVOKED') {
-                isSignalingSubscribedRef.current = false;
-            }
-        });
+              // Announce online
+               sendSignal('USER_ONLINE', undefined, {});
+          }
+          if (status === 'CLOSED' || status === 'REVOKED') {
+              isSignalingSubscribedRef.current = false;
+              console.debug('[SIGNAL] channel closed/revoked');
+          }
+      });
 
     return () => {
         if (signalingChannelRef.current) supabase.removeChannel(signalingChannelRef.current);
@@ -649,10 +653,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
 
   const sendSignal = async (type: SignalData['type'], recipientId: string | undefined, payload: any) => {
-    if (!currentUser) return;
-    // If channel is subscribed, send immediately. Otherwise queue to avoid REST fallback warnings.
+    if (!currentUser) {
+      console.warn('[SIGNAL] sendSignal called without currentUser, dropping', type, recipientId);
+      return;
+    }
+
+    // If channel is subscribed, attempt immediate send
     if (isSignalingSubscribedRef.current && signalingChannelRef.current) {
       try {
+        console.debug('[SIGNAL] sending', type, 'to', recipientId);
         await signalingChannelRef.current.send({ type: 'broadcast', event: 'signal', payload: { type, senderId: currentUser.id, recipientId, payload } });
       } catch (e) {
         console.error('sendSignal failed to send over realtime channel, queuing', e);
@@ -663,7 +672,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Not subscribed yet: queue the signal and return
     pendingSignalsRef.current.push({ type, recipientId, payload });
-    console.debug('[SIGNAL] queued (channel not subscribed yet)', { type, recipientId });
+    console.debug('[SIGNAL] queued (channel not subscribed yet)', { type, recipientId, queueLen: pendingSignalsRef.current.length });
   };
 
   // --- Actions ---
