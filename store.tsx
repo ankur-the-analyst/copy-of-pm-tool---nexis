@@ -465,6 +465,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 const pc = peerConnectionsRef.current.get(senderId);
                 if (pc) {
                   await pc.setRemoteDescription(new RTCSessionDescription(signalPayload.sdp));
+                  // After remote description is set, flush any buffered candidates for this sender
+                  const pending = pendingRemoteCandidatesRef.current.get(senderId) || [];
+                  if (pending.length > 0) {
+                    for (const c of pending) {
+                      try {
+                        await pc.addIceCandidate(new RTCIceCandidate(c));
+                        console.debug('[WEBRTC] flushed pending remote candidate for (after ANSWER)', senderId, c);
+                      } catch (e) {
+                        console.error('[WEBRTC] error adding flushed candidate (after ANSWER) for', senderId, e);
+                      }
+                    }
+                    pendingRemoteCandidatesRef.current.delete(senderId);
+                  }
                   setActiveCallData(prev => {
                       if (!prev) return null;
                       if (prev.joinedIds.includes(senderId)) return prev;
@@ -968,22 +981,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     peerConnectionsRef.current.set(recipientId, pc);
 
-    // Flush any pending remote ICE candidates we received before this PC existed
-    const pending = pendingRemoteCandidatesRef.current.get(recipientId);
-    if (pending && pending.length > 0) {
-      (async () => {
-        for (const c of pending) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(c));
-            console.debug('[WEBRTC] flushed pending remote candidate for', recipientId, c);
-          } catch (e) {
-            console.error('[WEBRTC] error adding flushed candidate for', recipientId, e);
-          }
-        }
-      })();
-      pendingRemoteCandidatesRef.current.delete(recipientId);
-    }
-
+    // Do not flush candidates here unless remoteDescription is present.
+    // Flushing is performed after setting remote description to avoid InvalidStateError.
     return pc;
   };
 
@@ -1271,6 +1270,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (incomingCall.offer) {
         console.debug('[WEBRTC] acceptIncomingCall setting remote description from offer');
         await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
+
+        // After setting remote description, flush buffered candidates for caller
+        const pending = pendingRemoteCandidatesRef.current.get(incomingCall.callerId) || [];
+        if (pending.length > 0) {
+          for (const c of pending) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(c));
+              console.debug('[WEBRTC] flushed pending remote candidate for (after accept)', incomingCall.callerId, c);
+            } catch (e) {
+              console.error('[WEBRTC] error adding flushed candidate (after accept) for', incomingCall.callerId, e);
+            }
+          }
+          pendingRemoteCandidatesRef.current.delete(incomingCall.callerId);
+        }
+
         const answer = await pc.createAnswer();
         console.debug('[WEBRTC] acceptIncomingCall created answer');
         await pc.setLocalDescription(answer);
