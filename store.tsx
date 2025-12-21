@@ -1202,35 +1202,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (callsRestrictedRef.current) {
             console.debug('[CALLS] skipping insert because calls table is restricted by RLS for this user');
           } else {
-            // Your `calls` table stores a single recipient per row. Insert one row per recipient.
-            for (const rid of recipientIds) {
-              try {
-                const rowId = `${callId}-${rid}`;
-                const { error } = await supabase.from('calls').insert({
-                  id: rowId,
-                  caller_id: currentUser.id,
-                  recipient_id: rid,
-                  status: 'busy',
-                  started_at: Date.now(),
-                  ended_at: null,
-                  is_video: isVideo || false
-                });
-                if (error) {
-                  // Handle permission/auth errors gracefully
-                  if ((error as any).code === '42501') {
-                    console.warn('[CALLS] insert blocked by row-level security (42501). Skipping further inserts.');
-                    callsRestrictedRef.current = true;
-                    break;
-                  }
-                  if ((error as any).status === 401) {
-                    console.warn('[CALLS] insert unauthorized (401). Ensure user is authenticated or adjust RLS.');
-                    break;
-                  }
-                  console.error('Failed to insert call record for', rid, error);
+            // Insert a single call record matching your schema: caller_id (uuid), recipient_id (uuid), invited_ids (text[]), joined_ids (text[])
+            try {
+              const primaryRecipient = recipientIds && recipientIds.length > 0 ? recipientIds[0] : currentUser.id;
+              const { error } = await supabase.from('calls').insert({
+                id: callId,
+                caller_id: currentUser.id,
+                recipient_id: primaryRecipient,
+                status: 'busy',
+                started_at: Date.now(),
+                ended_at: null,
+                is_video: isVideo || false,
+                invited_ids: recipientIds,
+                joined_ids: []
+              });
+              if (error) {
+                if ((error as any).code === '42501') {
+                  console.warn('[CALLS] insert blocked by row-level security (42501). Skipping further inserts.');
+                  callsRestrictedRef.current = true;
+                } else if ((error as any).status === 401) {
+                  console.warn('[CALLS] insert unauthorized (401). Ensure user is authenticated or adjust RLS.');
+                } else {
+                  console.error('Failed to insert call record:', error);
                 }
-              } catch (e) {
-                console.error('Failed to insert call record for', rid, e);
               }
+            } catch (e) {
+              console.error('Failed to insert call record:', e);
             }
           }
         } else {
@@ -1426,7 +1423,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
              console.debug('[CALLS] skipping call record update because table is restricted by RLS');
            } else {
              try {
-               const { error: updErr } = await supabase.from('calls').update({ ended_at: Date.now(), status: 'completed' }).like('id', `${activeCallId}-%`);
+               const { error: updErr } = await supabase.from('calls').update({ ended_at: Date.now(), status: 'completed', joined_ids: joined }).eq('id', activeCallId);
                if (updErr) {
                  if ((updErr as any).code === '42501') {
                    console.warn('[CALLS] update blocked by row-level security (42501).');
