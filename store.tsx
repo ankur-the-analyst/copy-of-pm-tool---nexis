@@ -446,10 +446,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
             case 'OFFER':
               console.debug('[SIGNAL] OFFER from', senderId, 'isVideo=', signalPayload?.isVideo, 'callId=', signalPayload?.callId);
-              if (isInCall) {
-                console.debug('[SIGNAL] OFFER ignored - user is already in a call', { myId: currentUser?.id });
-                return; // Busy
+              // If we're already in a call, only ignore if this OFFER belongs to a different call.
+              const incomingCallId = signalPayload?.callId;
+              if (isInCall && incomingCallId && activeCallId && incomingCallId !== activeCallId) {
+                console.debug('[SIGNAL] OFFER ignored - user is already in a different call', { myId: currentUser?.id, incomingCallId, activeCallId });
+                return; // Busy in another call
               }
+
+              // If we're in the same call (renegotiation for screen-share / new tracks), handle automatically
+              if (isInCall && incomingCallId && activeCallId && incomingCallId === activeCallId) {
+                console.debug('[SIGNAL] OFFER received for existing call - processing renegotiation from', senderId);
+                try {
+                  let pc = peerConnectionsRef.current.get(senderId);
+                  if (!pc) {
+                    pc = createPeerConnection(senderId);
+                    // Attach existing local tracks if available
+                    if (localStream) localStream.getTracks().forEach(track => { try { pc!.addTrack(track, localStream!); } catch(e) { console.error('Error adding local track during renegotiation', e); } });
+                  }
+
+                  if (signalPayload?.sdp) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(signalPayload.sdp));
+
+                    // Flush any buffered candidates for sender now that remote description is set
+                    const pending = pendingRemoteCandidatesRef.current.get(senderId) || [];
+                    if (pending.length > 0) {
+                      for (const c of pending) {
+                        try { await pc.addIceCandidate(new RTCIceCandidate(c)); console.debug('[WEBRTC] flushed pending candidate (reneg) for', senderId); } catch (e) { console.error('[WEBRTC] error adding flushed candidate (reneg)', e); }
+                      }
+                      pendingRemoteCandidatesRef.current.delete(senderId);
+                    }
+
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    sendSignal('ANSWER', senderId, { sdp: { type: answer.type, sdp: answer.sdp }, callId: incomingCallId });
+                  }
+                } catch (e) {
+                  console.error('Error handling renegotiation OFFER from', senderId, e);
+                }
+                return;
+              }
+
+              // Not currently in the call: treat as a fresh incoming call invitation
               setIncomingCall({
                 callerId: senderId,
                 isVideo: signalPayload.isVideo,
