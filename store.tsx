@@ -219,6 +219,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return false;
   };
 
+  const isMobileDevice = () => {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    return /Mobi|Android|iPhone|iPad|iPod|Opera Mini|IEMobile/i.test(ua);
+  };
+
   const hasMicrophone = async () => {
     try {
       if (typeof navigator === 'undefined') return false;
@@ -1374,6 +1380,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const toggleScreenShare = async () => {
     // Allow screen-share even if there are no peers; create or augment localStream
+    if (isMobileDevice()) {
+      alert('Screen sharing is not supported on mobile devices in this app.');
+      console.debug('[CALLS] blocked screen share on mobile device');
+      return;
+    }
+
     if (!isGetDisplayMediaAvailable()) {
       console.error('getDisplayMedia not available for screen sharing');
       alert('Screen sharing is not supported in this browser or the page is not secure (HTTPS).');
