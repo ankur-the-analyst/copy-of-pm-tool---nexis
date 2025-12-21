@@ -447,23 +447,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                       return { ...prev, joinedIds: [...prev.joinedIds, senderId] };
                   });
 
-                  // Update calls table to add this joined participant
-                  try {
-                    const callId = signalPayload.callId || activeCallId;
-                    if (callId) {
-                      // fetch current joined_ids
-                      const { data } = await supabase.from('calls').select('joined_ids').eq('id', callId).single();
-                      if (data) {
-                        const existing: string[] = data.joined_ids || [];
-                        if (!existing.includes(senderId)) {
-                          const { error: updErr } = await supabase.from('calls').update({ joined_ids: [...existing, senderId] }).eq('id', callId);
-                          if (updErr) console.error('Failed to update call joined_ids:', updErr);
-                        }
-                      }
-                    }
-                  } catch (e) {
-                    console.error('Error updating call record on ANSWER:', e);
-                  }
+                  // NOTE: Your `calls` table does not track joined participant arrays.
+                  // We avoid attempting to update non-existent `joined_ids` columns.
                 }
               }
               break;
@@ -926,20 +911,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const createPeerConnection = (recipientId: string) => {
     const pc = new RTCPeerConnection(RTC_CONFIG);
-    
+
+    console.debug('[WEBRTC] createPeerConnection for', recipientId, 'pc=', pc);
+
     pc.onicecandidate = (event) => {
+      console.debug('[WEBRTC] onicecandidate for', recipientId, event.candidate);
       if (event.candidate) {
         sendSignal('CANDIDATE', recipientId, { candidate: event.candidate.toJSON() });
       }
     };
 
     pc.ontrack = (event) => {
+      console.debug('[WEBRTC] ontrack for', recipientId, 'streams=', event.streams.map(s => s.id));
       setRemoteStreams(prev => {
           const newMap = new Map(prev);
           newMap.set(recipientId, event.streams[0]);
           return newMap;
       });
     };
+
+    pc.onconnectionstatechange = () => console.debug('[WEBRTC] connectionstatechange', recipientId, pc.connectionState);
+    pc.onsignalingstatechange = () => console.debug('[WEBRTC] signalingstatechange', recipientId, pc.signalingState);
+    pc.oniceconnectionstatechange = () => console.debug('[WEBRTC] iceconnectionstatechange', recipientId, pc.iceConnectionState);
+    pc.onicegatheringstatechange = () => console.debug('[WEBRTC] icegatheringstatechange', recipientId, pc.iceGatheringState);
+    pc.onnegotiationneeded = () => console.debug('[WEBRTC] negotiationneeded', recipientId);
 
     peerConnectionsRef.current.set(recipientId, pc);
     return pc;
@@ -1111,16 +1106,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     (async () => {
       try {
         if (hasCallsTable) {
-          const { error } = await supabase.from('calls').insert({
-            id: callId,
-            initiator_id: currentUser.id,
-            invited_ids: recipientIds,
-            joined_ids: [],
-            started_at: Date.now(),
-            ended_at: null,
-            status: 'ongoing'
-          });
-          if (error) console.error('Failed to insert call record:', error);
+          // Your `calls` table stores a single recipient per row. Insert one row per recipient.
+          for (const rid of recipientIds) {
+            try {
+              const rowId = `${callId}-${rid}`;
+              const { error } = await supabase.from('calls').insert({
+                id: rowId,
+                caller_id: currentUser.id,
+                recipient_id: rid,
+                status: 'busy',
+                started_at: Date.now(),
+                ended_at: null,
+                is_video: isVideo || false
+              });
+              if (error) console.error('Failed to insert call record for', rid, error);
+            } catch (e) {
+              console.error('Failed to insert call record for', rid, e);
+            }
+          }
         } else {
           console.debug('[CALLS] skipping call record insert because `calls` table is not available');
         }
@@ -1132,10 +1135,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     recipientIds.forEach(async (recipientId) => {
         try {
              const pc = createPeerConnection(recipientId);
-             stream!.getTracks().forEach(track => pc.addTrack(track, stream!));
+             console.debug('[WEBRTC] adding local tracks to pc for', recipientId);
+             stream!.getTracks().forEach(track => {
+               try { pc.addTrack(track, stream!); console.debug('[WEBRTC] added track', track.kind, 'to', recipientId); } catch(e) { console.error('Error adding track to pc', e); }
+             });
              const offer = await pc.createOffer();
+             console.debug('[WEBRTC] created offer for', recipientId, offer.type);
              await pc.setLocalDescription(offer);
-        sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo, callId });
+             console.debug('[WEBRTC] setLocalDescription for', recipientId);
+             sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo, callId });
         } catch(e) {
             console.error(`Failed to call ${recipientId}`, e);
         }
@@ -1166,9 +1174,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               }
           }
           const pc = createPeerConnection(recipientId);
-          stream!.getTracks().forEach(track => pc.addTrack(track, stream!));
+          console.debug('[WEBRTC] initiateCallConnection - adding tracks to', recipientId);
+          stream!.getTracks().forEach(track => {
+            try { pc.addTrack(track, stream!); console.debug('[WEBRTC] added track', track.kind, 'to', recipientId); } catch(e) { console.error('Error adding track to pc', e); }
+          });
           const offer = await pc.createOffer();
+          console.debug('[WEBRTC] initiateCallConnection created offer for', recipientId);
           await pc.setLocalDescription(offer);
+          console.debug('[WEBRTC] initiateCallConnection setLocalDescription for', recipientId);
           sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo, callId: activeCallId || null });
       } catch (err) { console.error("Error initiating connection:", err); }
   }
@@ -1187,12 +1200,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setLocalStream(stream);
 
       const pc = createPeerConnection(incomingCall.callerId);
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
-      
+      console.debug('[WEBRTC] acceptIncomingCall - adding local tracks to pc for', incomingCall.callerId);
+      stream.getTracks().forEach(track => {
+        try { pc.addTrack(track, stream); console.debug('[WEBRTC] added track', track.kind, 'to pc for', incomingCall.callerId); } catch (e) { console.error('Error adding track during acceptIncomingCall', e); }
+      });
+
       if (incomingCall.offer) {
+        console.debug('[WEBRTC] acceptIncomingCall setting remote description from offer');
         await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
         const answer = await pc.createAnswer();
+        console.debug('[WEBRTC] acceptIncomingCall created answer');
         await pc.setLocalDescription(answer);
+        console.debug('[WEBRTC] acceptIncomingCall setLocalDescription and sending ANSWER');
         sendSignal('ANSWER', incomingCall.callerId, { sdp: { type: answer.type, sdp: answer.sdp }, callId: incomingCall.callId });
       }
       setIsInCall(true);
@@ -1279,8 +1298,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
        // Update calls table to mark ended (only if available)
        try {
          if (hasCallsTable && activeCallId) {
-           const { error: updErr } = await supabase.from('calls').update({ ended_at: Date.now(), status: 'ended', joined_ids: joined }).eq('id', activeCallId);
-           if (updErr) console.error('Failed to update call record on end:', updErr);
+           try {
+             // We created per-recipient rows with id = `${callId}-${recipientId}`. Update all rows for this call.
+             const { error: updErr } = await supabase.from('calls').update({ ended_at: Date.now(), status: 'completed' }).like('id', `${activeCallId}-%`);
+             if (updErr) console.error('Failed to update call record on end:', updErr);
+           } catch (e) {
+             console.error('Failed to update call records on end:', e);
+           }
          } else {
            if (!hasCallsTable) console.debug('[CALLS] skipping call record update because `calls` table is not available');
          }
