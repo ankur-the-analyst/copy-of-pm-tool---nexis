@@ -978,6 +978,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     pc.oniceconnectionstatechange = () => console.debug('[WEBRTC] iceconnectionstatechange', recipientId, pc.iceConnectionState);
     pc.onicegatheringstatechange = () => console.debug('[WEBRTC] icegatheringstatechange', recipientId, pc.iceGatheringState);
     pc.onnegotiationneeded = () => console.debug('[WEBRTC] negotiationneeded', recipientId);
+    pc.onconnectionstatechange = () => {
+      console.debug('[WEBRTC] connectionstatechange', recipientId, pc.connectionState);
+      if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
+        setActiveCallData(prev => {
+          if (!prev) return prev;
+          if (prev.joinedIds.includes(recipientId)) return prev;
+          return { ...prev, joinedIds: [...prev.joinedIds, recipientId] };
+        });
+      }
+    };
 
     peerConnectionsRef.current.set(recipientId, pc);
 
@@ -988,16 +998,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const toggleMic = async () => {
     if (isMicOn) {
-      // Mute: prefer disabling tracks so we can unmute without reacquiring permission
-      if (localStream) localStream.getAudioTracks().forEach(t => { try { t.enabled = false; } catch(e){} });
+      // Soft-mute: disable audio tracks instead of removing/stopping them so we can unmute without renegotiation
+      if (localStream) localStream.getAudioTracks().forEach(t => { try { t.enabled = false; } catch(e) {} });
       setIsMicOn(false);
-      peerConnectionsRef.current.forEach(pc => {
-        const senders = pc.getSenders();
-        const sender = senders.find(s => s.track?.kind === 'audio');
-        if (sender && sender.track) {
-          try { sender.track.enabled = false; } catch(e) {}
-        }
-      });
       return;
     }
 
@@ -1015,45 +1018,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // Unmute: if we already have an audio track, just enable it
+      // If we already have an audio track in localStream, just enable it
       if (localStream && localStream.getAudioTracks().length > 0) {
-        localStream.getAudioTracks().forEach(t => { try { t.enabled = true; } catch(e){} });
-        for (const pc of peerConnectionsRef.current.values()) {
-          const senders = pc.getSenders();
-          const sender = senders.find(s => s.track?.kind === 'audio');
-          if (sender && sender.track) {
-            try { sender.track.enabled = true; } catch(e) {}
-          } else {
-            // If no sender track exists, attach the local audio track
-            const track = localStream.getAudioTracks()[0];
-            if (track) {
-              try { pc.addTrack(track, localStream); } catch(e) { console.error('Error adding existing audio track to pc', e); }
-            }
-          }
-        }
+        localStream.getAudioTracks().forEach(t => { try { t.enabled = true; } catch(e) {} });
         setIsMicOn(true);
         return;
       }
 
-      // No existing audio track: request mic permission and attach
+      // Otherwise, acquire microphone and add track to localStream and peers
       const stream = await getUserMediaSafe({ audio: true });
-      setLocalStream(prev => {
-        // If there is an existing local stream, merge tracks; otherwise use new stream
-        if (prev) {
-          try { prev.getAudioTracks().forEach(t => { try { t.stop(); } catch(e){}; prev.removeTrack(t); }); } catch(e) {}
-          stream.getAudioTracks().forEach(t => prev.addTrack(t));
-          return new MediaStream(prev.getTracks());
+      const audioTrack = stream.getAudioTracks()[0];
+      if (!localStream) {
+        setLocalStream(stream);
+      } else {
+        try {
+          localStream.addTrack(audioTrack);
+        } catch(e) {
+          console.error('Error adding audio track to existing localStream', e);
         }
-        return stream;
-      });
+      }
+
       for (const pc of peerConnectionsRef.current.values()) {
-        const audioTrack = stream.getAudioTracks()[0];
         const senders = pc.getSenders();
-        const sender = senders.find(s => s.track?.kind === 'audio');
-        if (sender) {
-          try { await sender.replaceTrack(audioTrack); } catch(e) { console.error('Error replacing track on unmute', e); }
-        } else {
-          try { pc.addTrack(audioTrack, stream); } catch(e) { console.error('Error adding track on unmute', e); }
+        const sender = senders.find(s => s.track && s.track.kind === 'audio');
+        try {
+          if (sender && audioTrack) await sender.replaceTrack(audioTrack);
+          else if (audioTrack) pc.addTrack(audioTrack, localStream || stream);
+        } catch (e) {
+          console.error('Error attaching audio track to peer connection', e);
         }
       }
       setIsMicOn(true);
