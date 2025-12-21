@@ -110,6 +110,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // WebRTC Refs - Now using a Map for multiple connections
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const signalingChannelRef = useRef<RealtimeChannel | null>(null);
+  const isSignalingSubscribedRef = useRef<boolean>(false);
+  const pendingSignalsRef = useRef<Array<{ type: any; recipientId?: string | undefined; payload: any }>>([]);
   const localVideoTrackRef = useRef<MediaStreamTrack | null>(null); 
   
   // Ref to track incoming call state within event listeners without dependency loops
@@ -262,6 +264,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
   }, [incomingCall]);
+
+  // Track whether the `calls` table exists to avoid repeated 400 errors when it's absent
+  const [hasCallsTable, setHasCallsTable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { error } = await supabase.from('calls').select('id').limit(1);
+        if (!cancelled) setHasCallsTable(error ? false : true);
+      } catch (e) {
+        if (!cancelled) setHasCallsTable(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // --- 1. Fetch Initial Data from Supabase ---
   useEffect(() => {
@@ -537,12 +554,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
       })
       .subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-              signalingChannelRef.current = channel;
-              // Announce online
-               sendSignal('USER_ONLINE', undefined, {});
-          }
-      });
+            if (status === 'SUBSCRIBED') {
+                signalingChannelRef.current = channel;
+                isSignalingSubscribedRef.current = true;
+                // Flush any queued signals
+                (async () => {
+                  try {
+                    const queued = pendingSignalsRef.current.splice(0, pendingSignalsRef.current.length);
+                    for (const q of queued) {
+                      await signalingChannelRef.current?.send({ type: 'broadcast', event: 'signal', payload: { type: q.type, senderId: currentUser?.id, recipientId: q.recipientId, payload: q.payload } });
+                    }
+                  } catch (e) {
+                    console.error('Error flushing queued signals', e);
+                  }
+                })();
+
+                // Announce online
+                 sendSignal('USER_ONLINE', undefined, {});
+            }
+            if (status === 'CLOSED' || status === 'REVOKED') {
+                isSignalingSubscribedRef.current = false;
+            }
+        });
 
     return () => {
         if (signalingChannelRef.current) supabase.removeChannel(signalingChannelRef.current);
@@ -551,18 +584,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
 
   const sendSignal = async (type: SignalData['type'], recipientId: string | undefined, payload: any) => {
-    if (signalingChannelRef.current && currentUser) {
-      await signalingChannelRef.current.send({
-        type: 'broadcast',
-        event: 'signal',
-        payload: {
-            type,
-            senderId: currentUser.id,
-            recipientId,
-            payload
-        }
-      });
+    if (!currentUser) return;
+    // If channel is subscribed, send immediately. Otherwise queue to avoid REST fallback warnings.
+    if (isSignalingSubscribedRef.current && signalingChannelRef.current) {
+      try {
+        await signalingChannelRef.current.send({ type: 'broadcast', event: 'signal', payload: { type, senderId: currentUser.id, recipientId, payload } });
+      } catch (e) {
+        console.error('sendSignal failed to send over realtime channel, queuing', e);
+        pendingSignalsRef.current.push({ type, recipientId, payload });
+      }
+      return;
     }
+
+    // Not subscribed yet: queue the signal and return
+    pendingSignalsRef.current.push({ type, recipientId, payload });
+    console.debug('[SIGNAL] queued (channel not subscribed yet)', { type, recipientId });
   };
 
   // --- Actions ---
@@ -1074,16 +1110,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Create call record in DB
     (async () => {
       try {
-        const { error } = await supabase.from('calls').insert({
-          id: callId,
-          initiator_id: currentUser.id,
-          invited_ids: recipientIds,
-          joined_ids: [],
-          started_at: Date.now(),
-          ended_at: null,
-          status: 'ongoing'
-        });
-        if (error) console.error('Failed to insert call record:', error);
+        if (hasCallsTable) {
+          const { error } = await supabase.from('calls').insert({
+            id: callId,
+            initiator_id: currentUser.id,
+            invited_ids: recipientIds,
+            joined_ids: [],
+            started_at: Date.now(),
+            ended_at: null,
+            status: 'ongoing'
+          });
+          if (error) console.error('Failed to insert call record:', error);
+        } else {
+          console.debug('[CALLS] skipping call record insert because `calls` table is not available');
+        }
       } catch (e) {
         console.error('Error creating call record:', e);
       }
@@ -1236,11 +1276,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
          }
        }
 
-       // Update calls table to mark ended
+       // Update calls table to mark ended (only if available)
        try {
-         if (activeCallId) {
+         if (hasCallsTable && activeCallId) {
            const { error: updErr } = await supabase.from('calls').update({ ended_at: Date.now(), status: 'ended', joined_ids: joined }).eq('id', activeCallId);
            if (updErr) console.error('Failed to update call record on end:', updErr);
+         } else {
+           if (!hasCallsTable) console.debug('[CALLS] skipping call record update because `calls` table is not available');
          }
        } catch (e) {
          console.error('Error updating call record on end:', e);
