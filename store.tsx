@@ -1066,14 +1066,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       // If we already have an audio track in localStream, just enable it
       if (localStream && localStream.getAudioTracks().length > 0) {
-        localStream.getAudioTracks().forEach(t => { try { t.enabled = true; } catch(e) {} });
-        setIsMicOn(true);
-        return;
+        const existing = localStream.getAudioTracks()[0];
+        // If the existing track has ended, acquire a fresh one instead of enabling
+        if (existing.readyState === 'ended') {
+          // fall through to acquire new mic
+        } else {
+          localStream.getAudioTracks().forEach(t => { try { t.enabled = true; } catch(e) {} });
+          setIsMicOn(true);
+          return;
+        }
       }
 
       // Otherwise, acquire microphone and add track to localStream and peers
       const stream = await getUserMediaSafe({ audio: true });
       const audioTrack = stream.getAudioTracks()[0];
+      // Remove any ended audio tracks from localStream to avoid duplicates
+      if (localStream) {
+        try {
+          for (const t of localStream.getAudioTracks()) if (t.readyState === 'ended') localStream.removeTrack(t);
+        } catch (e) { console.debug('Error cleaning ended audio tracks', e); }
+      }
       if (!localStream) {
         setLocalStream(stream);
       } else {
@@ -1142,24 +1154,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // If there are existing video tracks in localStream (possibly disabled), re-enable them instead of adding new ones.
       if (localStream && localStream.getVideoTracks().length > 0) {
         const existingVideoTrack = localStream.getVideoTracks()[0];
-        try { existingVideoTrack.enabled = true; } catch(e) { console.error('Error enabling existing video track', e); }
-        // Replace or add on peers as needed
-        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const senders = pc.getSenders();
-          const videoSender = senders.find(s => s.track?.kind === 'video');
-          try {
-            if (videoSender) {
-              await videoSender.replaceTrack(existingVideoTrack);
-            } else {
-              pc.addTrack(existingVideoTrack, localStream);
-              const offer = await pc.createOffer();
-              await pc.setLocalDescription(offer);
-              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
-            }
-          } catch (e) { console.error('Error re-attaching existing video track to peer', e); }
+        // If the existing track has ended, we need to acquire a fresh camera track
+        if (existingVideoTrack.readyState !== 'ended') {
+          try { existingVideoTrack.enabled = true; } catch(e) { console.error('Error enabling existing video track', e); }
+          // Replace or add on peers as needed
+          for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+            const senders = pc.getSenders();
+            const videoSender = senders.find(s => s.track?.kind === 'video');
+            try {
+              if (videoSender) {
+                await videoSender.replaceTrack(existingVideoTrack);
+              } else {
+                pc.addTrack(existingVideoTrack, localStream);
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
+              }
+            } catch (e) { console.error('Error re-attaching existing video track to peer', e); }
+          }
+          setIsCameraOn(true);
+          setLocalStream(new MediaStream(localStream.getTracks()));
+        } else {
+          // existing track ended — fall through and acquire new camera below
         }
-        setIsCameraOn(true);
-        setLocalStream(new MediaStream(localStream.getTracks()));
       } else {
         // No existing video tracks: acquire camera and attach to peers.
         const newStream = await getUserMediaSafe({ video: true });
