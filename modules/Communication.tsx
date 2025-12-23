@@ -397,7 +397,7 @@ export const Communication: React.FC = () => {
                  </div>
 
                  {/* 2. Sidebar (Sideways Column) */}
-                 <div className="w-full md:w-64 bg-slate-900 border-l border-slate-800 flex flex-row md:flex-col p-3 space-x-3 md:space-x-0 md:space-y-3 overflow-x-auto md:overflow-y-auto shrink-0 z-10">
+                 <div className="w-full md:w-64 bg-slate-900 border-l border-slate-800 flex flex-row md:flex-col p-3 space-x-3 md:space-x-0 md:space-y-3 overflow-x-auto md:overflow-y-auto shrink-0 z-60">
                     
                     {/* Local User Card */}
                     <div className="relative shrink-0 w-40 md:w-full aspect-video bg-slate-800 rounded-xl overflow-hidden border border-slate-700 shadow-md group">

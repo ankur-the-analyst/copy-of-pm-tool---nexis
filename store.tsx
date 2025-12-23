@@ -1139,32 +1139,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // Acquire camera and attach to existing peers. If no localStream yet, set it.
-      const newStream = await getUserMediaSafe({ video: true });
-      const newVideoTrack = newStream.getVideoTracks()[0];
-      if (!localStream) {
-        setLocalStream(newStream);
-      } else {
-        try { localStream.addTrack(newVideoTrack); } catch(e) { console.error('Error adding new video track to existing localStream', e); }
-      }
-
-      for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const senders = pc.getSenders();
-        const videoSender = senders.find(s => s.track?.kind === 'video');
-        if (videoSender) {
-          try { await videoSender.replaceTrack(newVideoTrack); } catch(e) { console.error('Error replacing video track on sender', e); }
-        } else {
+      // If there are existing video tracks in localStream (possibly disabled), re-enable them instead of adding new ones.
+      if (localStream && localStream.getVideoTracks().length > 0) {
+        const existingVideoTrack = localStream.getVideoTracks()[0];
+        try { existingVideoTrack.enabled = true; } catch(e) { console.error('Error enabling existing video track', e); }
+        // Replace or add on peers as needed
+        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+          const senders = pc.getSenders();
+          const videoSender = senders.find(s => s.track?.kind === 'video');
           try {
-            pc.addTrack(newVideoTrack, localStream || newStream);
-            // Renegotiate because we added a sender where none existed
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
-          } catch (e) { console.error('Error adding video track and renegotiating', e); }
+            if (videoSender) {
+              await videoSender.replaceTrack(existingVideoTrack);
+            } else {
+              pc.addTrack(existingVideoTrack, localStream);
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
+            }
+          } catch (e) { console.error('Error re-attaching existing video track to peer', e); }
         }
+        setIsCameraOn(true);
+        setLocalStream(new MediaStream(localStream.getTracks()));
+      } else {
+        // No existing video tracks: acquire camera and attach to peers.
+        const newStream = await getUserMediaSafe({ video: true });
+        const newVideoTrack = newStream.getVideoTracks()[0];
+        if (!localStream) {
+          setLocalStream(newStream);
+        } else {
+          try { localStream.addTrack(newVideoTrack); } catch(e) { console.error('Error adding new video track to existing localStream', e); }
+        }
+
+        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+          const senders = pc.getSenders();
+          const videoSender = senders.find(s => s.track?.kind === 'video');
+          if (videoSender) {
+            try { await videoSender.replaceTrack(newVideoTrack); } catch(e) { console.error('Error replacing video track on sender', e); }
+          } else {
+            try {
+              pc.addTrack(newVideoTrack, localStream || newStream);
+              // Renegotiate because we added a sender where none existed
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
+            } catch (e) { console.error('Error adding video track and renegotiating', e); }
+          }
+        }
+        setIsCameraOn(true);
+        setLocalStream(new MediaStream((localStream || newStream).getTracks()));
       }
-      setIsCameraOn(true);
-      setLocalStream(new MediaStream((localStream || newStream).getTracks()));
     } catch (e) {
       console.error("Failed to acquire camera:", e);
       alert("Could not access camera.");
