@@ -1053,17 +1053,54 @@ export const Communication: React.FC = () => {
 
 // Helper component for remote videos to handle refs
 const RemoteVideoPlayer: React.FC<{ stream: MediaStream; isMainStage?: boolean }> = ({ stream, isMainStage }) => {
-    const videoRef = useRef<HTMLVideoElement>(null);
-    useEffect(() => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playBlocked, setPlayBlocked] = useState(false);
+  const [userRequestedAudio, setUserRequestedAudio] = useState(false);
+
+  useEffect(() => {
     if (!videoRef.current) return;
     try {
+      // Mute by default so browsers allow autoplay of the video element.
+      videoRef.current.muted = true;
       videoRef.current.srcObject = stream;
-      // Attempt to play to work around autoplay policies; callers will still need to unmute if required.
       const p = videoRef.current.play();
-      if (p && typeof p.then === 'function') p.catch(e => console.debug('Remote video play blocked (autoplay):', e));
+      if (p && typeof p.then === 'function') {
+        p.then(() => setPlayBlocked(false)).catch(e => {
+          console.debug('Remote video play blocked (autoplay):', e);
+          setPlayBlocked(true);
+        });
+      }
     } catch (e) {
       console.debug('Failed to assign remote stream to video element', e);
+      setPlayBlocked(true);
     }
-    }, [stream]);
-    return <video ref={videoRef} autoPlay playsInline className={`w-full h-full ${isMainStage ? 'object-contain bg-black' : 'object-cover'}`} />;
+  }, [stream]);
+
+  const enableAudio = async () => {
+    if (!videoRef.current) return;
+    try {
+      videoRef.current.muted = false;
+      await videoRef.current.play();
+      setUserRequestedAudio(true);
+      setPlayBlocked(false);
+    } catch (e) {
+      console.debug('Failed to enable audio/play on user gesture', e);
+    }
+  };
+
+  return (
+    <div className={`w-full h-full relative ${isMainStage ? '' : ''}`}>
+      <video ref={videoRef} autoPlay playsInline className={`w-full h-full ${isMainStage ? 'object-contain bg-black' : 'object-cover'}`} />
+      {playBlocked && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+          <button onClick={enableAudio} className="px-3 py-2 bg-indigo-600 text-white rounded">Enable Audio / Play</button>
+        </div>
+      )}
+      {!playBlocked && !userRequestedAudio && (
+        <div className="absolute top-2 right-2">
+          <button onClick={enableAudio} className="px-2 py-1 bg-black/40 text-white rounded text-xs">Unmute</button>
+        </div>
+      )}
+    </div>
+  );
 };
