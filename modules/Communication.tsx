@@ -95,6 +95,20 @@ export const Communication: React.FC = () => {
     }
   }, [localStream, isInCall, viewMode, isCameraOn]);
 
+  // Ensure local video element attempts to play when camera becomes active
+  useEffect(() => {
+    const el = localVideoRef.current;
+    if (!el) return;
+    if (isCameraOn && el.srcObject) {
+      try {
+        const p = el.play();
+        if (p && typeof p.then === 'function') p.catch(e => console.debug('Local video play blocked:', e));
+      } catch (e) {
+        console.debug('Error playing local video element', e);
+      }
+    }
+  }, [localStream, isCameraOn]);
+
   // Reset view mode when call ends
   useEffect(() => {
     if (!isInCall) setViewMode('default');
