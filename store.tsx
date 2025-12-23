@@ -1118,14 +1118,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (isCameraOn) {
-      if (localStream) localStream.getVideoTracks().forEach(track => { track.stop(); localStream.removeTrack(track); });
-      peerConnectionsRef.current.forEach(pc => {
-        const senders = pc.getSenders();
-        const videoSender = senders.find(s => s.track?.kind === 'video');
-        if (videoSender) videoSender.replaceTrack(null);
-      });
+      // Soft-disable camera by toggling track.enabled instead of stopping/removing tracks.
+      // This avoids renegotiation and prevents stuck states when re-enabling later.
+      if (localStream) localStream.getVideoTracks().forEach(track => { try { track.enabled = false; } catch (e) {} });
       setIsCameraOn(false);
-      if (localStream) setLocalStream(new MediaStream(localStream.getTracks()));
       return;
     }
 

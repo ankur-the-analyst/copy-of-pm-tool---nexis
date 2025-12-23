@@ -461,9 +461,14 @@ export const Communication: React.FC = () => {
          {viewMode !== 'pip' && (
            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex items-center space-x-4 z-50">
              <div className="bg-slate-900/90 backdrop-blur-md rounded-full px-6 py-3 border border-slate-700 shadow-2xl flex items-center space-x-4">
-                <button onClick={toggleMic} className={`p-3 rounded-full transition-transform hover:scale-110 ${!isMicOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}>{!isMicOn ? <MicOff size={20} /> : <Mic size={20} />}</button>
-                <button onClick={toggleCamera} className={`p-3 rounded-full transition-transform hover:scale-110 ${!isCameraOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}>{!isCameraOn ? <VideoOff size={20} /> : <Video size={20} />}</button>
-                <button onClick={toggleScreenShare} className={`p-3 rounded-full transition-transform hover:scale-110 ${isScreenSharing ? 'bg-blue-500 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}><Monitor size={20} /></button>
+                  <button onClick={toggleMic} className={`p-3 rounded-full transition-transform hover:scale-110 ${!isMicOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}>{!isMicOn ? <MicOff size={20} /> : <Mic size={20} />}</button>
+                  {/* Hide camera and screen-share controls for audio-only calls */}
+                  {activeCallData?.isVideo && (
+                    <>
+                      <button onClick={toggleCamera} className={`p-3 rounded-full transition-transform hover:scale-110 ${!isCameraOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}>{!isCameraOn ? <VideoOff size={20} /> : <Video size={20} />}</button>
+                      <button onClick={toggleScreenShare} className={`p-3 rounded-full transition-transform hover:scale-110 ${isScreenSharing ? 'bg-blue-500 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}><Monitor size={20} /></button>
+                    </>
+                  )}
                 <div className="w-px h-8 bg-slate-700 mx-2"></div>
                 <button onClick={() => setIsInviteModalOpen(true)} className="p-3 rounded-full bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg transition-transform hover:scale-110"><UserPlus size={20} /></button>
                 <button onClick={endCall} className="p-3 rounded-full bg-red-600 text-white hover:bg-red-700 shadow-lg transition-transform hover:scale-110"><PhoneOff size={20} /></button>
