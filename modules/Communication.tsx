@@ -1055,7 +1055,15 @@ export const Communication: React.FC = () => {
 const RemoteVideoPlayer: React.FC<{ stream: MediaStream; isMainStage?: boolean }> = ({ stream, isMainStage }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     useEffect(() => {
-        if (videoRef.current) videoRef.current.srcObject = stream;
+    if (!videoRef.current) return;
+    try {
+      videoRef.current.srcObject = stream;
+      // Attempt to play to work around autoplay policies; callers will still need to unmute if required.
+      const p = videoRef.current.play();
+      if (p && typeof p.then === 'function') p.catch(e => console.debug('Remote video play blocked (autoplay):', e));
+    } catch (e) {
+      console.debug('Failed to assign remote stream to video element', e);
+    }
     }, [stream]);
     return <video ref={videoRef} autoPlay playsInline className={`w-full h-full ${isMainStage ? 'object-contain bg-black' : 'object-cover'}`} />;
 };

@@ -1084,12 +1084,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      for (const pc of peerConnectionsRef.current.values()) {
+      // Iterate peer connections with their recipient ids so we can renegotiate when adding a new sender
+      for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
         const senders = pc.getSenders();
         const sender = senders.find(s => s.track && s.track.kind === 'audio');
         try {
-          if (sender && audioTrack) await sender.replaceTrack(audioTrack);
-          else if (audioTrack) pc.addTrack(audioTrack, localStream || stream);
+          if (sender && audioTrack) {
+            await sender.replaceTrack(audioTrack);
+          } else if (audioTrack) {
+            pc.addTrack(audioTrack, localStream || stream);
+            // Need to renegotiate because we added a sender where none existed before
+            try {
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: isCameraOn, callId: activeCallId || null });
+            } catch (e) { console.error('Error renegotiating after adding audio track', e); }
+          }
         } catch (e) {
           console.error('Error attaching audio track to peer connection', e);
         }
@@ -1133,31 +1143,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      if (!localStream) {
-        const stream = await getUserMediaSafe({ video: true });
-        setLocalStream(stream);
-        setIsCameraOn(true);
-        for (const pc of peerConnectionsRef.current.values()) {
-          const videoTrack = stream.getVideoTracks()[0];
-          const senders = pc.getSenders();
-          const videoSender = senders.find(s => s.track?.kind === 'video');
-          if (videoSender) await videoSender.replaceTrack(videoTrack);
-          else pc.addTrack(videoTrack, stream);
-        }
-        return;
-      }
-
+      // Acquire camera and attach to existing peers. If no localStream yet, set it.
       const newStream = await getUserMediaSafe({ video: true });
       const newVideoTrack = newStream.getVideoTracks()[0];
-      localStream.addTrack(newVideoTrack);
-      for (const pc of peerConnectionsRef.current.values()) {
+      if (!localStream) {
+        setLocalStream(newStream);
+      } else {
+        try { localStream.addTrack(newVideoTrack); } catch(e) { console.error('Error adding new video track to existing localStream', e); }
+      }
+
+      for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
         const senders = pc.getSenders();
         const videoSender = senders.find(s => s.track?.kind === 'video');
-        if (videoSender) await videoSender.replaceTrack(newVideoTrack);
-        else pc.addTrack(newVideoTrack, localStream);
+        if (videoSender) {
+          try { await videoSender.replaceTrack(newVideoTrack); } catch(e) { console.error('Error replacing video track on sender', e); }
+        } else {
+          try {
+            pc.addTrack(newVideoTrack, localStream || newStream);
+            // Renegotiate because we added a sender where none existed
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
+          } catch (e) { console.error('Error adding video track and renegotiating', e); }
+        }
       }
       setIsCameraOn(true);
-      setLocalStream(new MediaStream(localStream.getTracks()));
+      setLocalStream(new MediaStream((localStream || newStream).getTracks()));
     } catch (e) {
       console.error("Failed to acquire camera:", e);
       alert("Could not access camera.");
@@ -1174,30 +1185,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const startGroupCall = async (recipientIds: string[], isVideo: boolean) => {
     if (!currentUser || recipientIds.length === 0) return;
     
-    let stream = localStream;
-    if (!stream) {
-      if (!isGetUserMediaAvailable()) {
-        console.error('getUserMedia is not available in this environment.');
-        alert('Your browser does not support camera/microphone access or the page is not secure (HTTPS).');
-        return;
-      }
-        try {
-           stream = await getUserMediaSafe({ video: isVideo, audio: true });
-           setIsMicOn(true);
-           setIsCameraOn(isVideo);
-        } catch (e) {
-           console.error("Error getting user media", e);
-           try {
-               stream = await getUserMediaSafe({ video: false, audio: true });
-               setIsMicOn(true);
-               setIsCameraOn(false);
-           } catch(e2) {
-               console.error("No media devices found");
-               return; 
-           }
-        }
-        setLocalStream(stream);
-    }
+    // Do NOT auto-acquire camera/microphone when starting a call.
+    // Respect user's preference to keep mic/camera off by default.
+    // If `localStream` already exists we will attach its tracks; otherwise we create offers without tracks.
+    const stream = localStream;
     
     setIsInCall(true);
     const callId = 'c-' + Date.now();
@@ -1247,13 +1238,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     })();
     
+    // For each recipient create a peer connection. If we already have local tracks, attach them.
     recipientIds.forEach(async (recipientId) => {
         try {
              const pc = createPeerConnection(recipientId);
-             console.debug('[WEBRTC] adding local tracks to pc for', recipientId);
-             stream!.getTracks().forEach(track => {
-               try { pc.addTrack(track, stream!); console.debug('[WEBRTC] added track', track.kind, 'to', recipientId); } catch(e) { console.error('Error adding track to pc', e); }
-             });
+             console.debug('[WEBRTC] preparing offer for', recipientId);
+             if (stream) {
+               try {
+                 stream.getTracks().forEach(track => { pc.addTrack(track, stream); console.debug('[WEBRTC] added track', track.kind, 'to', recipientId); });
+               } catch (e) { console.error('Error adding existing local tracks to pc', e); }
+             }
              const offer = await pc.createOffer();
              console.debug('[WEBRTC] created offer for', recipientId, offer.type);
              await pc.setLocalDescription(offer);
@@ -1273,26 +1267,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const initiateCallConnection = async (recipientId: string, isVideo: boolean, isAdding: boolean = false) => {
       try {
-          let stream = localStream;
-        if (!stream || !isAdding) {
-          if (!isGetUserMediaAvailable()) {
-            console.error('getUserMedia not available for initiating connection');
-            alert('Cannot access camera/microphone in this environment.');
-            return;
-          }
-          try { stream = await getUserMediaSafe({ video: isVideo, audio: true }); } 
-          catch (e) { stream = await getUserMediaSafe({ video: false, audio: true }); }
-              if (!isAdding) {
-                setLocalStream(stream);
-                setIsMicOn(true);
-                setIsCameraOn(isVideo);
-              }
-          }
+          // Do not auto-acquire media here. If `localStream` exists, attach its tracks; otherwise create offer without tracks.
+          const stream = localStream;
           const pc = createPeerConnection(recipientId);
-          console.debug('[WEBRTC] initiateCallConnection - adding tracks to', recipientId);
-          stream!.getTracks().forEach(track => {
-            try { pc.addTrack(track, stream!); console.debug('[WEBRTC] added track', track.kind, 'to', recipientId); } catch(e) { console.error('Error adding track to pc', e); }
-          });
+          console.debug('[WEBRTC] initiateCallConnection - preparing offer for', recipientId);
+          if (stream) {
+            try {
+              stream.getTracks().forEach(track => { pc.addTrack(track, stream); console.debug('[WEBRTC] added track', track.kind, 'to', recipientId); });
+            } catch (e) { console.error('Error adding existing local tracks to pc', e); }
+          }
           const offer = await pc.createOffer();
           console.debug('[WEBRTC] initiateCallConnection created offer for', recipientId);
           await pc.setLocalDescription(offer);
@@ -1304,21 +1287,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const acceptIncomingCall = async () => {
     if (!incomingCall || !currentUser) return;
     try {
-      if (!isGetUserMediaAvailable()) {
-        console.error('getUserMedia not available for acceptIncomingCall');
-        alert('Cannot access camera/microphone in this environment.');
-        return;
-      }
-      let stream: MediaStream;
-      try { stream = await getUserMediaSafe({ video: true, audio: true }); setIsMicOn(true); setIsCameraOn(true); } 
-      catch (e) { stream = await getUserMediaSafe({ video: false, audio: true }); setIsMicOn(true); setIsCameraOn(false); }
-      setLocalStream(stream);
-
+      // Do not auto-acquire mic/camera when accepting. Create peer connection and answer the offer without local tracks.
       const pc = createPeerConnection(incomingCall.callerId);
-      console.debug('[WEBRTC] acceptIncomingCall - adding local tracks to pc for', incomingCall.callerId);
-      stream.getTracks().forEach(track => {
-        try { pc.addTrack(track, stream); console.debug('[WEBRTC] added track', track.kind, 'to pc for', incomingCall.callerId); } catch (e) { console.error('Error adding track during acceptIncomingCall', e); }
-      });
 
       if (incomingCall.offer) {
         console.debug('[WEBRTC] acceptIncomingCall setting remote description from offer');
@@ -1344,6 +1314,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         console.debug('[WEBRTC] acceptIncomingCall setLocalDescription and sending ANSWER');
         sendSignal('ANSWER', incomingCall.callerId, { sdp: { type: answer.type, sdp: answer.sdp }, callId: incomingCall.callId });
       }
+
       setIsInCall(true);
       setActiveCallId(incomingCall.callId || null);
       setActiveCallData({ invitedIds: [incomingCall.callerId], joinedIds: [incomingCall.callerId], isVideo: incomingCall.isVideo });
