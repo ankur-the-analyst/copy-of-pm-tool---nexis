@@ -1,0 +1,10 @@
+/* Minimal stylesheet to satisfy index.html link.
+   Tailwind is loaded via CDN in index.html, so this file can hold overrides.
+*/
+
+/* Example small override */
+html, body {
+  height: 100%;
+}
+
+/* You can add app-wide custom styles here */

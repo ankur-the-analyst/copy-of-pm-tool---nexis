@@ -1043,6 +1043,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     peerConnectionsRef.current.set(recipientId, pc);
 
+    // Ensure there's always a video m-line to avoid removing m-lines when users toggle video.
+    try {
+      if (typeof pc.addTransceiver === 'function') {
+        pc.addTransceiver('video', { direction: 'sendrecv' });
+        console.debug('[WEBRTC] added video transceiver for', recipientId);
+      }
+    } catch (e) {
+      console.debug('[WEBRTC] addTransceiver not supported or failed for', recipientId, e);
+    }
+
     // Do not flush candidates here unless remoteDescription is present.
     // Flushing is performed after setting remote description to avoid InvalidStateError.
     return pc;
@@ -1181,7 +1191,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               pc.addTrack(placeholderVideoTrackRef.current, localStream!);
               const offer = await pc.createOffer();
               await pc.setLocalDescription(offer);
-              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: false, callId: activeCallId || null });
+              // Keep isVideo=true so the SDP maintains the video m-line even when using a placeholder
+              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
             }
           } catch (e) { console.error('Error replacing/adding placeholder video track on peer', e); }
         }
