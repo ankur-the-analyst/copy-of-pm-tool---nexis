@@ -118,6 +118,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isSignalingSubscribedRef = useRef<boolean>(false);
   const pendingSignalsRef = useRef<Array<{ type: any; recipientId?: string | undefined; payload: any }>>([]);
   const localVideoTrackRef = useRef<MediaStreamTrack | null>(null); 
+  const placeholderVideoTrackRef = useRef<MediaStreamTrack | null>(null);
   const pendingRemoteCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   
   // Ref to track incoming call state within event listeners without dependency loops
@@ -1129,16 +1130,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const toggleCamera = async () => {
+    // If currently screen-sharing, toggle camera state locally only
     if (isScreenSharing) {
       setIsCameraOn(!isCameraOn);
       return;
     }
 
+    // If camera is ON -> disable it by replacing with a placeholder track (keeps sender alive)
     if (isCameraOn) {
-      // Soft-disable camera by toggling track.enabled instead of stopping/removing tracks.
-      // This avoids renegotiation and prevents stuck states when re-enabling later.
-      if (localStream) localStream.getVideoTracks().forEach(track => { try { track.enabled = false; } catch (e) {} });
-      setIsCameraOn(false);
+      try {
+        // Stop and remove any real camera tracks from localStream
+        if (localStream) {
+          const realVideoTracks = localStream.getVideoTracks();
+          for (const t of realVideoTracks) {
+            try { t.stop(); } catch(e) {}
+            try { localStream.removeTrack(t); } catch(e) {}
+          }
+        }
+
+        // Create placeholder track if not present
+        if (!placeholderVideoTrackRef.current) {
+          try {
+            const canvas = Object.assign(document.createElement('canvas'), { width: 320, height: 240 });
+            const ctx = canvas.getContext('2d');
+            if (ctx) { ctx.fillStyle = 'black'; ctx.fillRect(0,0,canvas.width, canvas.height); }
+            const phStream = (canvas as any).captureStream ? (canvas as any).captureStream(1) : null;
+            if (phStream) {
+              const phTrack = phStream.getVideoTracks()[0];
+              placeholderVideoTrackRef.current = phTrack;
+            }
+          } catch (e) { console.error('Failed to create placeholder track', e); }
+        }
+
+        // Add placeholder to localStream so local preview can show blank and senders have a track
+        if (placeholderVideoTrackRef.current) {
+          if (!localStream) setLocalStream(new MediaStream([placeholderVideoTrackRef.current]));
+          else {
+            try { localStream.addTrack(placeholderVideoTrackRef.current); } catch(e) {}
+          }
+        }
+
+        // Replace sender tracks with placeholder to avoid renegotiation where possible
+        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+          const senders = pc.getSenders();
+          const videoSender = senders.find(s => s.track?.kind === 'video');
+          try {
+            if (videoSender && placeholderVideoTrackRef.current) {
+              await videoSender.replaceTrack(placeholderVideoTrackRef.current);
+            } else if (placeholderVideoTrackRef.current) {
+              pc.addTrack(placeholderVideoTrackRef.current, localStream!);
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: false, callId: activeCallId || null });
+            }
+          } catch (e) { console.error('Error replacing/adding placeholder video track on peer', e); }
+        }
+
+        setIsCameraOn(false);
+      } catch (e) {
+        console.error('Error disabling camera gracefully', e);
+        // fallback: just disable tracks
+        if (localStream) localStream.getVideoTracks().forEach(track => { try { track.enabled = false; } catch(e) {} });
+        setIsCameraOn(false);
+      }
+
       return;
     }
 
@@ -1156,60 +1211,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     try {
-      // If there are existing video tracks in localStream (possibly disabled), re-enable them instead of adding new ones.
-      if (localStream && localStream.getVideoTracks().length > 0) {
-        const existingVideoTrack = localStream.getVideoTracks()[0];
-        // If the existing track has ended, we need to acquire a fresh camera track
-        if (existingVideoTrack.readyState !== 'ended') {
-          try { existingVideoTrack.enabled = true; } catch(e) { console.error('Error enabling existing video track', e); }
-          // Replace or add on peers as needed
-          for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-            const senders = pc.getSenders();
-            const videoSender = senders.find(s => s.track?.kind === 'video');
-            try {
-              if (videoSender) {
-                await videoSender.replaceTrack(existingVideoTrack);
-              } else {
-                pc.addTrack(existingVideoTrack, localStream);
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
-              }
-            } catch (e) { console.error('Error re-attaching existing video track to peer', e); }
-          }
-          setIsCameraOn(true);
-          setLocalStream(new MediaStream(localStream.getTracks()));
-        } else {
-          // existing track ended — fall through and acquire new camera below
-        }
-      } else {
-        // No existing video tracks: acquire camera and attach to peers.
-        const newStream = await getUserMediaSafe({ video: true });
-        const newVideoTrack = newStream.getVideoTracks()[0];
-        if (!localStream) {
-          setLocalStream(newStream);
-        } else {
-          try { localStream.addTrack(newVideoTrack); } catch(e) { console.error('Error adding new video track to existing localStream', e); }
-        }
+      const newStream = await getUserMediaSafe({ video: true });
+      const newVideoTrack = newStream.getVideoTracks()[0];
 
-        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const senders = pc.getSenders();
-          const videoSender = senders.find(s => s.track?.kind === 'video');
+      // Replace placeholder or add to peers
+      for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+        const senders = pc.getSenders();
+        const videoSender = senders.find(s => s.track?.kind === 'video');
+        try {
           if (videoSender) {
-            try { await videoSender.replaceTrack(newVideoTrack); } catch(e) { console.error('Error replacing video track on sender', e); }
+            await videoSender.replaceTrack(newVideoTrack);
           } else {
-            try {
-              pc.addTrack(newVideoTrack, localStream || newStream);
-              // Renegotiate because we added a sender where none existed
-              const offer = await pc.createOffer();
-              await pc.setLocalDescription(offer);
-              sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
-            } catch (e) { console.error('Error adding video track and renegotiating', e); }
+            pc.addTrack(newVideoTrack, localStream || newStream);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp }, isVideo: true, callId: activeCallId || null });
           }
-        }
-        setIsCameraOn(true);
-        setLocalStream(new MediaStream((localStream || newStream).getTracks()));
+        } catch (e) { console.error('Error attaching new video track to peer', e); }
       }
+
+      // Update localStream: remove placeholder if present and add real track
+      if (!localStream) setLocalStream(new MediaStream(newStream.getTracks()));
+      else {
+        try {
+          // remove placeholder
+          if (placeholderVideoTrackRef.current) {
+            try { localStream.removeTrack(placeholderVideoTrackRef.current); placeholderVideoTrackRef.current.stop && placeholderVideoTrackRef.current.stop(); } catch(e) {}
+            placeholderVideoTrackRef.current = null;
+          }
+          localStream.addTrack(newVideoTrack);
+        } catch (e) { console.error('Error updating localStream with new video track', e); }
+        setLocalStream(new MediaStream(localStream.getTracks()));
+      }
+
+      setIsCameraOn(true);
+      localVideoTrackRef.current = newVideoTrack;
     } catch (e) {
       console.error("Failed to acquire camera:", e);
       alert("Could not access camera.");
@@ -1490,6 +1526,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const cleanupCall = () => {
     if (localStream) { localStream.getTracks().forEach(track => track.stop()); }
+    if (placeholderVideoTrackRef.current) { try { placeholderVideoTrackRef.current.stop(); } catch(e) {} placeholderVideoTrackRef.current = null; }
     peerConnectionsRef.current.forEach(pc => pc.close());
     peerConnectionsRef.current.clear();
     setLocalStream(null);
