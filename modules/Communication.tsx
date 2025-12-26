@@ -1132,50 +1132,119 @@ export const Communication: React.FC = () => {
 
 // Helper component for remote videos to handle refs
 const RemoteVideoPlayer: React.FC<{ stream: MediaStream; isMainStage?: boolean }> = ({ stream, isMainStage }) => {
+  const { allowAutoplayForRemote, setAllowAutoplayForRemote } = useApp();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const [playBlocked, setPlayBlocked] = useState(false);
   const [userRequestedAudio, setUserRequestedAudio] = useState(false);
 
+  const hasVideo = !!stream.getVideoTracks().length;
+  const hasAudio = !!stream.getAudioTracks().length;
+
   useEffect(() => {
-    if (!videoRef.current) return;
-    try {
-      // Mute by default so browsers allow autoplay of the video element.
-      videoRef.current.muted = true;
-      videoRef.current.srcObject = stream;
-      const p = videoRef.current.play();
-      if (p && typeof p.then === 'function') {
-        p.then(() => setPlayBlocked(false)).catch(e => {
-          console.debug('Remote video play blocked (autoplay):', e);
-          setPlayBlocked(true);
-        });
+    const tryPlayUnmuted = async (el: HTMLMediaElement | null) => {
+      if (!el) return false;
+      try {
+        el.muted = false;
+        const p = el.play();
+        if (p && typeof p.then === 'function') {
+          await p;
+        }
+        return true;
+      } catch (e) {
+        console.debug('Unmuted play blocked:', e);
+        return false;
       }
-    } catch (e) {
-      console.debug('Failed to assign remote stream to video element', e);
-      setPlayBlocked(true);
+    };
+
+    const tryPlayMuted = async (el: HTMLMediaElement | null) => {
+      if (!el) return false;
+      try {
+        el.muted = true;
+        const p = el.play();
+        if (p && typeof p.then === 'function') await p;
+        return true;
+      } catch (e) {
+        console.debug('Muted play blocked:', e);
+        return false;
+      }
+    };
+
+    // Assign stream to appropriate element
+    if (hasVideo) {
+      const el = videoRef.current;
+      if (!el) return;
+      el.srcObject = stream;
+
+      (async () => {
+        // If user recently performed a gesture (accepted/started call), try unmuted first
+        if (allowAutoplayForRemote) {
+          const ok = await tryPlayUnmuted(el);
+          if (!ok) {
+            await tryPlayMuted(el);
+            setPlayBlocked(true);
+          } else {
+            setPlayBlocked(false);
+            setUserRequestedAudio(true);
+            // reset allowance after used once
+            setAllowAutoplayForRemote(false);
+          }
+        } else {
+          const ok = await tryPlayMuted(el);
+          if (!ok) setPlayBlocked(true);
+        }
+      })();
+    } else if (hasAudio) {
+      const el = audioRef.current;
+      if (!el) return;
+      el.srcObject = stream;
+
+      (async () => {
+        if (allowAutoplayForRemote) {
+          const ok = await tryPlayUnmuted(el);
+          if (!ok) {
+            setPlayBlocked(true);
+          } else {
+            setPlayBlocked(false);
+            setUserRequestedAudio(true);
+            setAllowAutoplayForRemote(false);
+          }
+        } else {
+          // Attempt to play muted (may be blocked for audio elements in some browsers)
+          const ok = await tryPlayMuted(el);
+          if (!ok) setPlayBlocked(true);
+        }
+      })();
     }
-  }, [stream]);
+  }, [stream, allowAutoplayForRemote]);
 
   const enableAudio = async () => {
-    if (!videoRef.current) return;
     try {
-      videoRef.current.muted = false;
-      await videoRef.current.play();
+      const el = hasVideo ? videoRef.current : audioRef.current;
+      if (!el) return;
+      el.muted = false;
+      await el.play();
       setUserRequestedAudio(true);
       setPlayBlocked(false);
-    } catch (e) {
-      console.debug('Failed to enable audio/play on user gesture', e);
-    }
+    } catch (e) { console.debug('Failed to enable audio/play on user gesture', e); }
   };
 
   return (
     <div className={`w-full h-full relative ${isMainStage ? '' : ''}`}>
-      <video ref={videoRef} autoPlay playsInline className={`w-full h-full ${isMainStage ? 'object-contain bg-black' : 'object-cover'}`} />
+      {hasVideo ? (
+        <video ref={videoRef} autoPlay playsInline className={`w-full h-full ${isMainStage ? 'object-contain bg-black' : 'object-cover'}`} />
+      ) : hasAudio ? (
+        <audio ref={audioRef} autoPlay />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-slate-400">No media</div>
+      )}
+
       {playBlocked && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/40">
           <button onClick={enableAudio} className="px-3 py-2 bg-indigo-600 text-white rounded">Enable Audio / Play</button>
         </div>
       )}
-      {!playBlocked && !userRequestedAudio && (
+      {!playBlocked && !userRequestedAudio && hasAudio && (
         <div className="absolute top-2 right-2">
           <button onClick={enableAudio} className="px-2 py-1 bg-black/40 text-white rounded text-xs">Unmute</button>
         </div>

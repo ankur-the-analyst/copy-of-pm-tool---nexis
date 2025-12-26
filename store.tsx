@@ -61,6 +61,9 @@ interface AppContextType {
   rejectIncomingCall: () => void;
   endCall: () => Promise<void>;
   toggleScreenShare: () => Promise<void>;
+  // Allow remote autoplay after a user gesture (e.g., accepted or started a call)
+  allowAutoplayForRemote: boolean;
+  setAllowAutoplayForRemote: (v: boolean) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -106,6 +109,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Media Controls State (Default to OFF as requested)
   const [isMicOn, setIsMicOn] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
+  // If true, RemoteVideoPlayer may attempt unmuted autoplay because user performed a gesture
+  const [allowAutoplayForRemote, setAllowAutoplayForRemote] = useState(false);
 
   // WebRTC Refs - Now using a Map for multiple connections
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -1220,7 +1225,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const startGroupCall = async (recipientIds: string[], isVideo: boolean) => {
     if (!currentUser || recipientIds.length === 0) return;
-    
+    // Mark that user initiated a call so remote autoplay can be attempted
+    setAllowAutoplayForRemote(true);
+
     // Do NOT auto-acquire camera/microphone when starting a call.
     // Respect user's preference to keep mic/camera off by default.
     // If `localStream` already exists we will attach its tracks; otherwise we create offers without tracks.
@@ -1323,6 +1330,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const acceptIncomingCall = async () => {
     if (!incomingCall || !currentUser) return;
     try {
+      // User accepted incoming call via UI gesture: allow autoplay
+      setAllowAutoplayForRemote(true);
       // Do not auto-acquire mic/camera when accepting. Create peer connection and answer the offer without local tracks.
       const pc = createPeerConnection(incomingCall.callerId);
 
@@ -1595,6 +1604,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     <AppContext.Provider value={{
       currentUser, users, projects, tasks, messages, groups, notifications, incomingCall, isInCall, activeCallData, activeCallId,
       localStream, remoteStreams, isScreenSharing, isMicOn, isCameraOn,
+      allowAutoplayForRemote, setAllowAutoplayForRemote,
       deletedMessageIds, clearChatHistory,
       login, logout, addUser, updateUser, deleteUser, addTask, updateTask, moveTask, addMessage, createGroup, addProject, updateProject, deleteProject,
       triggerNotification, markNotificationRead, clearNotifications, clearNotification, clearAllNotifications, markChatRead, getUnreadCount, totalUnreadChatCount,
