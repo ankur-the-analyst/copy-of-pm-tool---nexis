@@ -26,6 +26,10 @@ export const Communication: React.FC = () => {
   const [showMobileChat, setShowMobileChat] = useState(false); 
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [viewMode, setViewMode] = useState<'default' | 'fullscreen' | 'pip'>('default');
+  // Device availability checks
+  const [micAvailable, setMicAvailable] = useState<boolean | null>(null);
+  const [cameraAvailable, setCameraAvailable] = useState<boolean | null>(null);
+  const [mediaSupported, setMediaSupported] = useState<boolean>(typeof navigator !== 'undefined' && !!(navigator.mediaDevices && (navigator.mediaDevices.getUserMedia || navigator.mediaDevices.enumerateDevices)));
 
   // Chat Visibility State
   const [hiddenChatIds, setHiddenChatIds] = useState<string[]>([]);
@@ -123,6 +127,41 @@ export const Communication: React.FC = () => {
     document.addEventListener('click', closeMenu);
     return () => document.removeEventListener('click', closeMenu);
   }, []);
+
+  // Detect available input devices (mic/camera) and getUserMedia support
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!mediaSupported) {
+          setMicAvailable(false);
+          setCameraAvailable(false);
+          return;
+        }
+
+        const nav: any = navigator;
+        if (nav.mediaDevices && typeof nav.mediaDevices.enumerateDevices === 'function') {
+          const devices = await nav.mediaDevices.enumerateDevices();
+          if (cancelled) return;
+          setMicAvailable(devices.some((d: any) => d.kind === 'audioinput'));
+          setCameraAvailable(devices.some((d: any) => d.kind === 'videoinput'));
+        } else {
+          setMicAvailable(false);
+          setCameraAvailable(false);
+        }
+      } catch (e) {
+        console.error('Error enumerating media devices', e);
+        if (!cancelled) {
+          setMicAvailable(false);
+          setCameraAvailable(false);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [mediaSupported]);
+
+  const displaySupported = typeof navigator !== 'undefined' && !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function');
 
 
   const handleSend = (e: React.FormEvent) => {
@@ -475,12 +514,33 @@ export const Communication: React.FC = () => {
          {viewMode !== 'pip' && (
            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex items-center space-x-4 z-50">
              <div className="bg-slate-900/90 backdrop-blur-md rounded-full px-6 py-3 border border-slate-700 shadow-2xl flex items-center space-x-4">
-                  <button onClick={toggleMic} className={`p-3 rounded-full transition-transform hover:scale-110 ${!isMicOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}>{!isMicOn ? <MicOff size={20} /> : <Mic size={20} />}</button>
+                  <button
+                    onClick={toggleMic}
+                    disabled={mediaSupported === false || micAvailable === false}
+                    title={mediaSupported === false ? 'Media not supported by this browser/page' : micAvailable === false ? 'No microphone detected' : (isMicOn ? 'Mute microphone' : 'Unmute microphone')}
+                    className={`p-3 rounded-full transition-transform hover:scale-110 ${!isMicOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'} ${mediaSupported === false || micAvailable === false ? 'opacity-50 cursor-not-allowed hover:scale-100' : ''}`}
+                  >
+                    {!isMicOn ? <MicOff size={20} /> : <Mic size={20} />}
+                  </button>
                   {/* Hide camera and screen-share controls for audio-only calls */}
                   {activeCallData?.isVideo && (
                     <>
-                      <button onClick={toggleCamera} className={`p-3 rounded-full transition-transform hover:scale-110 ${!isCameraOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}>{!isCameraOn ? <VideoOff size={20} /> : <Video size={20} />}</button>
-                      <button onClick={toggleScreenShare} className={`p-3 rounded-full transition-transform hover:scale-110 ${isScreenSharing ? 'bg-blue-500 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'}`}><Monitor size={20} /></button>
+                      <button
+                        onClick={toggleCamera}
+                        disabled={mediaSupported === false || cameraAvailable === false}
+                        title={mediaSupported === false ? 'Media not supported by this browser/page' : cameraAvailable === false ? 'No camera detected' : (isCameraOn ? 'Turn off camera' : 'Turn on camera')}
+                        className={`p-3 rounded-full transition-transform hover:scale-110 ${!isCameraOn ? 'bg-red-50 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'} ${mediaSupported === false || cameraAvailable === false ? 'opacity-50 cursor-not-allowed hover:scale-100' : ''}`}
+                      >
+                        {!isCameraOn ? <VideoOff size={20} /> : <Video size={20} />}
+                      </button>
+                      <button
+                        onClick={toggleScreenShare}
+                        disabled={!displaySupported}
+                        title={!displaySupported ? 'Screen sharing not supported on this browser/device' : (isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing')}
+                        className={`p-3 rounded-full transition-transform hover:scale-110 ${isScreenSharing ? 'bg-blue-500 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'} ${!displaySupported ? 'opacity-50 cursor-not-allowed hover:scale-100' : ''}`}
+                      >
+                        <Monitor size={20} />
+                      </button>
                     </>
                   )}
                 <div className="w-px h-8 bg-slate-700 mx-2"></div>
